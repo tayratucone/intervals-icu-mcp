@@ -9,6 +9,15 @@ from ..client import ICUAPIError, ICUClient
 from ..response_builder import ResponseBuilder
 
 
+def _all_streams(streams_data: Any) -> dict[str, Any]:
+    """Return every non-empty stream exposed by the ActivityStreams model."""
+    if hasattr(streams_data, "model_dump"):
+        payload = streams_data.model_dump(exclude_none=True)
+    else:
+        payload = getattr(streams_data, "__dict__", {})
+    return {key: value for key, value in payload.items() if value is not None}
+
+
 async def get_activity_streams(
     activity_id: Annotated[str, "Activity ID to fetch streams for"],
     streams: Annotated[
@@ -50,41 +59,19 @@ async def get_activity_streams(
         async with ICUClient(config) as client:
             streams_data = await client.get_activity_streams(activity_id, streams)
 
-            # Count available streams
-            available_streams: list[str] = []
-            stream_lengths: dict[str, int] = {}
-
-            for stream_name in [
-                "watts",
-                "heartrate",
-                "cadence",
-                "velocity_smooth",
-                "altitude",
-                "distance",
-                "time",
-                "latlng",
-                "temp",
-                "moving",
-                "grade_smooth",
-            ]:
-                stream_value: Any = getattr(streams_data, stream_name, None)
-                if stream_value is not None:
-                    available_streams.append(stream_name)
-                    if isinstance(stream_value, list):
-                        stream_lengths[stream_name] = len(cast(list[Any], stream_value))
+            streams_dict = _all_streams(streams_data)
+            available_streams = list(streams_dict.keys())
+            stream_lengths = {
+                name: len(cast(list[Any], value))
+                for name, value in streams_dict.items()
+                if isinstance(value, list)
+            }
 
             if not available_streams:
                 return ResponseBuilder.build_response(
                     data={"streams": {}, "available_streams": []},
                     metadata={"message": "No stream data available for this activity"},
                 )
-
-            # Build response
-            streams_dict: dict[str, Any] = {}
-            for stream_name in available_streams:
-                stream_value = getattr(streams_data, stream_name)
-                if stream_value is not None:
-                    streams_dict[stream_name] = stream_value
 
             result_data = {
                 "activity_id": activity_id,
