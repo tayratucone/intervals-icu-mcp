@@ -152,7 +152,7 @@ def _target_to_icu(target: Any, sport: str) -> tuple[str, str | None, str | None
     value = target.get("value")
 
     if target_type in {"pace", "swim_pace", "allure"}:
-        if target.get("min_sec_per_100m") is not None or "100m" in unit.lower():
+        if sport == "Swim" or target.get("min_sec_per_100m") is not None or "100m" in unit.lower():
             suffix = "/100m Pace"
             label_suffix = "/100"
             low = _pace_to_seconds(min_value if min_value is not None else value, "min/100m")
