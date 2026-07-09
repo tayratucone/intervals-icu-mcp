@@ -7,6 +7,7 @@ from fastmcp import Context
 
 from ..auth import ICUConfig
 from ..client import ICUAPIError, ICUClient
+from ..date_utils import date_part, parse_date
 from ..response_builder import ResponseBuilder
 
 
@@ -62,12 +63,12 @@ async def get_calendar_events(
             # Group events by date
             events_by_date: dict[str, list[dict[str, Any]]] = {}
             for event in events:
-                date = event.start_date_local
+                date = date_part(event.start_date_local)
                 if date not in events_by_date:
                     events_by_date[date] = []
 
                 # Determine relative timing
-                date_obj = datetime.strptime(date, "%Y-%m-%d").date()
+                date_obj = parse_date(date)
                 today = datetime.now().date()
 
                 if date_obj == today:
@@ -80,7 +81,9 @@ async def get_calendar_events(
                     relative_timing = f"in_{days_until}_days"
 
                 event_item: dict[str, Any] = {
+                    "id": event.id,
                     "date": date,
+                    "start_date_local": event.start_date_local,
                     "relative_timing": relative_timing,
                     "name": event.name or event.category or "Event",
                     "category": event.category,
@@ -189,7 +192,8 @@ async def get_upcoming_workouts(
 
             workouts_data: list[dict[str, Any]] = []
             for workout in workouts:
-                date_obj = datetime.strptime(workout.start_date_local, "%Y-%m-%d").date()
+                date = date_part(workout.start_date_local)
+                date_obj = parse_date(date)
                 today = datetime.now().date()
 
                 if date_obj == today:
@@ -201,7 +205,9 @@ async def get_upcoming_workouts(
                     relative_timing = f"in_{days_until}_days"
 
                 workout_item: dict[str, Any] = {
-                    "date": workout.start_date_local,
+                    "id": workout.id,
+                    "date": date,
+                    "start_date_local": workout.start_date_local,
                     "relative_timing": relative_timing,
                     "name": workout.name or "Workout",
                 }
@@ -274,7 +280,8 @@ async def get_event(
 
             event_data: dict[str, Any] = {
                 "id": event.id,
-                "date": event.start_date_local,
+                "date": date_part(event.start_date_local),
+                "start_date_local": event.start_date_local,
                 "name": event.name or event.category or "Event",
                 "category": event.category,
             }
