@@ -352,7 +352,9 @@ class ActivityStreams(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     watts: list[int | None] | None = None
+    power: list[int | None] | None = None
     raw_watts: list[int | None] | None = None
+    fixed_watts: list[int | None] | None = None
     heartrate: list[int | None] | None = None
     cadence: list[int | None] | None = None
     velocity_smooth: list[float | None] | None = None
