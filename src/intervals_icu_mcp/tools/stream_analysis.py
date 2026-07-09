@@ -216,7 +216,7 @@ def _zip_files(files: dict[str, str | bytes]) -> tuple[str, int, str]:
 
 
 def _moving_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [row for row in rows if row.get("moving") is not False and row.get("speed_mps")]
+    return [row for row in rows if row.get("moving") is not False]
 
 
 def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -456,10 +456,26 @@ def _surges(rows: list[dict[str, Any]], ftp: int | None = None) -> list[dict[str
 
 
 def _power_metrics(rows: list[dict[str, Any]], ftp: int | None = None) -> dict[str, Any]:
-    values = _valid_numbers([row.get("watts") for row in _moving_rows(rows)])
+    moving = _moving_rows(rows)
+    values = _valid_numbers([row.get("watts") for row in moving])
     if not values:
-        return {"available": False}
+        return {
+            "available": False,
+            "reason": "No numeric watts found in moving stream rows",
+            "moving_rows": len(moving),
+            "rows_with_watts": 0,
+        }
+    rows_with_power = [
+        row for row in moving
+        if isinstance(row.get("watts"), (int, float))
+    ]
+    rows_with_power_and_hr = [
+        row for row in rows_with_power
+        if isinstance(row.get("heartrate") or row.get("hr"), (int, float))
+    ]
     avg = mean(values)
+    hr_values = _valid_numbers([row.get("heartrate") or row.get("hr") for row in rows_with_power_and_hr])
+    avg_hr = mean(hr_values) if hr_values else None
     variability = None
     # Approximate normalized power from 30 s rolling averages if enough data exists.
     if len(values) >= 30:
@@ -472,6 +488,10 @@ def _power_metrics(rows: list[dict[str, Any]], ftp: int | None = None) -> dict[s
         "available": True,
         "avg_watts": round(avg, 1),
         "max_watts": max(values),
+        "rows_with_watts": len(rows_with_power),
+        "rows_with_watts_and_hr": len(rows_with_power_and_hr),
+        "avg_hr_during_power": round(avg_hr, 1) if avg_hr else None,
+        "watts_per_bpm": round(avg / avg_hr, 3) if avg_hr else None,
         "estimated_normalized_power": round(normalized, 1) if normalized else None,
         "variability_index": round(variability, 3) if variability else None,
     }
