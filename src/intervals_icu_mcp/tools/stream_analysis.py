@@ -1,8 +1,13 @@
 """Derived analysis from Intervals.icu activity streams."""
 
+import base64
+import csv
+import hashlib
+import io
 import json
 from statistics import mean
 from typing import Annotated, Any
+import zipfile
 
 from fastmcp import Context
 
@@ -22,6 +27,28 @@ STREAMS = [
     "altitude",
     "grade_smooth",
     "moving",
+]
+
+CANONICAL_COLUMNS = [
+    "index",
+    "timestamp",
+    "elapsed_s",
+    "moving_s",
+    "distance_m",
+    "lat",
+    "lon",
+    "altitude_m",
+    "velocity_mps",
+    "speed_kmh",
+    "watts",
+    "heartrate",
+    "cadence",
+    "temperature",
+    "grade",
+    "vertical_speed",
+    "pace",
+    "gap",
+    "is_moving",
 ]
 
 
@@ -63,6 +90,10 @@ def _pace_from_speed(speed_mps: float | None) -> float | None:
     return 1000.0 / speed_mps
 
 
+def _json_dump(data: Any) -> str:
+    return json.dumps(data, ensure_ascii=False, indent=2, default=str)
+
+
 def _build_rows(streams_data: Any) -> list[dict[str, Any]]:
     all_streams = _all_streams(streams_data)
     time = _seq(getattr(streams_data, "time", None))
@@ -82,30 +113,58 @@ def _build_rows(streams_data: Any) -> list[dict[str, Any]]:
     list_streams = {name: value for name, value in all_streams.items() if isinstance(value, list)}
     length = max([len(value) for value in list_streams.values()] or [0])
     rows: list[dict[str, Any]] = []
+    moving_s = 0
     for i in range(length):
         speed_value = _safe(speed[i]) if i < len(speed) else None
         pace = _pace_from_speed(speed_value)
+        is_moving = bool(moving[i]) if i < len(moving) and moving[i] is not None else None
+        if is_moving is not False:
+            moving_s += 1
+        lat = lon = None
+        latlng = all_streams.get("latlng")
+        if isinstance(latlng, list) and i < len(latlng) and isinstance(latlng[i], list):
+            if len(latlng[i]) >= 2:
+                lat, lon = latlng[i][0], latlng[i][1]
+        temp_stream = all_streams.get("temp") or all_streams.get("temperature")
         rows.append(
             {
+                "index": i,
+                "timestamp": None,
                 "second": int(time[i]) if i < len(time) and isinstance(time[i], (int, float)) else i,
+                "elapsed_s": int(time[i]) if i < len(time) and isinstance(time[i], (int, float)) else i,
+                "moving_s": moving_s,
                 "distance_m": round(float(distance[i]), 1)
                 if i < len(distance) and isinstance(distance[i], (int, float))
                 else None,
+                "lat": lat,
+                "lon": lon,
                 "pace_sec_per_km": round(pace, 1) if pace else None,
                 "pace": _format_pace(pace),
                 "hr": int(hr[i]) if i < len(hr) and isinstance(hr[i], (int, float)) else None,
+                "heartrate": int(hr[i]) if i < len(hr) and isinstance(hr[i], (int, float)) else None,
                 "cadence": round(float(cadence[i]), 1)
                 if i < len(cadence) and isinstance(cadence[i], (int, float))
                 else None,
                 "watts": int(power[i]) if i < len(power) and isinstance(power[i], (int, float)) else None,
                 "speed_mps": round(speed_value, 3) if speed_value is not None else None,
+                "velocity_mps": round(speed_value, 3) if speed_value is not None else None,
+                "speed_kmh": round(speed_value * 3.6, 2) if speed_value is not None else None,
                 "altitude_m": round(float(altitude[i]), 1)
                 if i < len(altitude) and isinstance(altitude[i], (int, float))
                 else None,
                 "grade_pct": round(float(grade[i]), 1)
                 if i < len(grade) and isinstance(grade[i], (int, float))
                 else None,
-                "moving": bool(moving[i]) if i < len(moving) and moving[i] is not None else None,
+                "grade": round(float(grade[i]), 1)
+                if i < len(grade) and isinstance(grade[i], (int, float))
+                else None,
+                "temperature": temp_stream[i]
+                if isinstance(temp_stream, list) and i < len(temp_stream)
+                else None,
+                "vertical_speed": None,
+                "gap": None,
+                "moving": is_moving,
+                "is_moving": is_moving,
             }
         )
         for stream_name, stream_values in list_streams.items():
@@ -114,6 +173,46 @@ def _build_rows(streams_data: Any) -> list[dict[str, Any]]:
             if len(stream_values) == length and i < len(stream_values):
                 rows[-1][stream_name] = stream_values[i]
     return rows
+
+
+def _columns_for_rows(rows: list[dict[str, Any]], requested: list[str] | None = None) -> list[str]:
+    if requested:
+        return requested
+    keys = {key for row in rows for key in row.keys()}
+    columns = [col for col in CANONICAL_COLUMNS if col in keys]
+    extras = sorted(keys - set(columns) - {"second", "hr", "speed_mps", "grade_pct", "moving"})
+    return columns + extras
+
+
+def _rows_as_arrays(rows: list[dict[str, Any]], columns: list[str]) -> list[list[Any]]:
+    return [[row.get(col) for col in columns] for row in rows]
+
+
+def _non_tabular_streams(streams_data: Any, row_count: int) -> dict[str, int]:
+    return {
+        name: len(value)
+        for name, value in _all_streams(streams_data).items()
+        if isinstance(value, list) and len(value) != row_count
+    }
+
+
+def _csv_from_rows(rows: list[dict[str, Any]], columns: list[str] | None = None) -> str:
+    columns = columns or _columns_for_rows(rows)
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=columns, extrasaction="ignore", lineterminator="\n")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(row)
+    return output.getvalue()
+
+
+def _zip_files(files: dict[str, str | bytes]) -> tuple[str, int, str]:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, content in files.items():
+            archive.writestr(name, content)
+    data = buffer.getvalue()
+    return base64.b64encode(data).decode("ascii"), len(data), hashlib.sha256(data).hexdigest()
 
 
 def _moving_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -284,6 +383,104 @@ def _hr_zones(rows: list[dict[str, Any]], zones_json: str | None) -> list[dict[s
     return counts
 
 
+def _time_splits(rows: list[dict[str, Any]], split_time_s: int) -> list[dict[str, Any]]:
+    moving = _moving_rows(rows)
+    if not moving or split_time_s <= 0:
+        return []
+    result = []
+    start_s = int(moving[0].get("elapsed_s") or moving[0].get("second") or 0)
+    end_s = int(moving[-1].get("elapsed_s") or moving[-1].get("second") or 0)
+    split = 1
+    cursor = start_s
+    while cursor < end_s:
+        chunk = [
+            row for row in moving
+            if cursor <= int(row.get("elapsed_s") or row.get("second") or 0) < cursor + split_time_s
+        ]
+        if chunk:
+            distance_delta = (chunk[-1].get("distance_m") or 0) - (chunk[0].get("distance_m") or 0)
+            pace = split_time_s / distance_delta * 1000 if distance_delta > 0 else None
+            result.append(
+                {
+                    "split": split,
+                    "start_s": cursor,
+                    "end_s": cursor + split_time_s,
+                    "distance_m": round(distance_delta, 1),
+                    "pace": _format_pace(pace),
+                    "avg_hr": _avg([row.get("heartrate") for row in chunk]),
+                    "avg_watts": _avg([row.get("watts") for row in chunk]),
+                    "avg_cadence": _avg([row.get("cadence") for row in chunk]),
+                }
+            )
+        split += 1
+        cursor += split_time_s
+    return result
+
+
+def _pauses(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    pauses = []
+    start = None
+    for row in rows:
+        moving = row.get("is_moving")
+        second = row.get("elapsed_s") or row.get("second")
+        if moving is False and start is None:
+            start = second
+        elif moving is not False and start is not None:
+            if second - start >= 5:
+                pauses.append({"start_s": start, "end_s": second, "duration_s": second - start})
+            start = None
+    return pauses
+
+
+def _surges(rows: list[dict[str, Any]], ftp: int | None = None) -> list[dict[str, Any]]:
+    surges = []
+    moving = _moving_rows(rows)
+    watts_values = _valid_numbers([row.get("watts") for row in moving])
+    if not watts_values:
+        return surges
+    threshold = ftp * 1.15 if ftp else max(mean(watts_values) * 1.5, sorted(watts_values)[int(len(watts_values) * 0.9)])
+    start = None
+    peak = 0
+    for row in moving:
+        watts = row.get("watts")
+        second = row.get("elapsed_s") or row.get("second")
+        if isinstance(watts, (int, float)) and watts >= threshold:
+            start = second if start is None else start
+            peak = max(peak, watts)
+        elif start is not None:
+            if second - start >= 5:
+                surges.append({"start_s": start, "end_s": second, "duration_s": second - start, "peak_watts": peak})
+            start = None
+            peak = 0
+    return surges[:50]
+
+
+def _power_metrics(rows: list[dict[str, Any]], ftp: int | None = None) -> dict[str, Any]:
+    values = _valid_numbers([row.get("watts") for row in _moving_rows(rows)])
+    if not values:
+        return {"available": False}
+    avg = mean(values)
+    variability = None
+    # Approximate normalized power from 30 s rolling averages if enough data exists.
+    if len(values) >= 30:
+        rolling = [mean(values[i : i + 30]) for i in range(0, len(values) - 29)]
+        normalized = mean([v**4 for v in rolling]) ** 0.25
+        variability = normalized / avg if avg else None
+    else:
+        normalized = None
+    data = {
+        "available": True,
+        "avg_watts": round(avg, 1),
+        "max_watts": max(values),
+        "estimated_normalized_power": round(normalized, 1) if normalized else None,
+        "variability_index": round(variability, 3) if variability else None,
+    }
+    if ftp:
+        data["seconds_above_ftp"] = sum(1 for v in values if v > ftp)
+        data["percent_above_ftp"] = round(data["seconds_above_ftp"] / len(values) * 100, 1)
+    return data
+
+
 async def analyze_activity_streams(
     activity_id: Annotated[str, "Activity ID to analyze from Intervals.icu streams"],
     split_distance_m: Annotated[int, "Split distance in meters. Use 1000 for running km splits."] = 1000,
@@ -331,6 +528,269 @@ async def analyze_activity_streams(
         return ResponseBuilder.build_error_response(
             f"Invalid hr_zones_json: {str(e)}", error_type="validation_error"
         )
+    except ValueError as e:
+        return ResponseBuilder.build_error_response(str(e), error_type="validation_error")
+    except ICUAPIError as e:
+        return ResponseBuilder.build_error_response(e.message, error_type="api_error")
+    except Exception as e:
+        return ResponseBuilder.build_error_response(
+            f"Unexpected error: {str(e)}", error_type="internal_error"
+        )
+
+
+async def get_activity_streams_page(
+    activity_id: Annotated[str, "Activity ID to read streams from"],
+    streams_json: Annotated[
+        str | None,
+        "Optional JSON array of columns/streams to return. If omitted, all available columns are returned.",
+    ] = None,
+    start_index: Annotated[int, "Zero-based row index to start from"] = 0,
+    limit: Annotated[int, "Maximum number of rows to return"] = 1000,
+    ctx: Context | None = None,
+) -> str:
+    """Return a page of second-by-second activity stream rows."""
+    assert ctx is not None
+    config: ICUConfig = ctx.get_state("config")
+    try:
+        requested = json.loads(streams_json) if streams_json else None
+        if requested is not None and not isinstance(requested, list):
+            raise ValueError("streams_json must be a JSON array of column names")
+        async with ICUClient(config) as client:
+            streams_data = await client.get_activity_streams(activity_id)
+        rows = _build_rows(streams_data)
+        columns = _columns_for_rows(rows, requested)
+        start_index = max(start_index, 0)
+        limit = max(min(limit, 5000), 1)
+        page = rows[start_index : start_index + limit]
+        next_index = start_index + len(page) if start_index + len(page) < len(rows) else None
+        return ResponseBuilder.build_response(
+            data={
+                "activity_id": activity_id,
+                "start_index": start_index,
+                "limit": limit,
+                "total_rows": len(rows),
+                "columns": columns,
+                "rows": _rows_as_arrays(page, columns),
+                "next_start_index": next_index,
+                "available_streams": list(_all_streams(streams_data).keys()),
+                "non_tabular_streams": _non_tabular_streams(streams_data, len(rows)),
+            },
+            query_type="activity_streams_page",
+        )
+    except json.JSONDecodeError as e:
+        return ResponseBuilder.build_error_response(f"Invalid streams_json: {str(e)}", error_type="validation_error")
+    except ValueError as e:
+        return ResponseBuilder.build_error_response(str(e), error_type="validation_error")
+    except ICUAPIError as e:
+        return ResponseBuilder.build_error_response(e.message, error_type="api_error")
+    except Exception as e:
+        return ResponseBuilder.build_error_response(
+            f"Unexpected error: {str(e)}", error_type="internal_error"
+        )
+
+
+async def get_activity_streams_window(
+    activity_id: Annotated[str, "Activity ID to read streams from"],
+    start_s: Annotated[int, "Start elapsed second"],
+    end_s: Annotated[int, "End elapsed second"],
+    streams_json: Annotated[
+        str | None,
+        "Optional JSON array of columns/streams to return. If omitted, all available columns are returned.",
+    ] = None,
+    ctx: Context | None = None,
+) -> str:
+    """Return second-by-second activity stream rows for a time window."""
+    assert ctx is not None
+    config: ICUConfig = ctx.get_state("config")
+    try:
+        requested = json.loads(streams_json) if streams_json else None
+        if requested is not None and not isinstance(requested, list):
+            raise ValueError("streams_json must be a JSON array of column names")
+        async with ICUClient(config) as client:
+            streams_data = await client.get_activity_streams(activity_id)
+        rows = [
+            row for row in _build_rows(streams_data)
+            if start_s <= int(row.get("elapsed_s") or row.get("second") or 0) <= end_s
+        ]
+        columns = _columns_for_rows(rows, requested)
+        return ResponseBuilder.build_response(
+            data={
+                "activity_id": activity_id,
+                "start_s": start_s,
+                "end_s": end_s,
+                "total_rows": len(rows),
+                "columns": columns,
+                "rows": _rows_as_arrays(rows, columns),
+                "available_streams": list(_all_streams(streams_data).keys()),
+                "non_tabular_streams": _non_tabular_streams(streams_data, len(_build_rows(streams_data))),
+            },
+            query_type="activity_streams_window",
+        )
+    except json.JSONDecodeError as e:
+        return ResponseBuilder.build_error_response(f"Invalid streams_json: {str(e)}", error_type="validation_error")
+    except ValueError as e:
+        return ResponseBuilder.build_error_response(str(e), error_type="validation_error")
+    except ICUAPIError as e:
+        return ResponseBuilder.build_error_response(e.message, error_type="api_error")
+    except Exception as e:
+        return ResponseBuilder.build_error_response(
+            f"Unexpected error: {str(e)}", error_type="internal_error"
+        )
+
+
+async def analyze_activity_full(
+    activity_id: Annotated[str, "Activity ID to analyze from Intervals.icu streams"],
+    split_distance_m: Annotated[int, "Distance split size in meters"] = 1000,
+    split_time_s: Annotated[int, "Time split size in seconds"] = 300,
+    ftp: Annotated[int | None, "Optional FTP for power metrics"] = None,
+    hr_zones_json: Annotated[str | None, "Optional JSON array of HR zones"] = None,
+    ctx: Context | None = None,
+) -> str:
+    """Return a richer coach-oriented activity analysis from streams."""
+    assert ctx is not None
+    config: ICUConfig = ctx.get_state("config")
+    try:
+        async with ICUClient(config) as client:
+            streams_data = await client.get_activity_streams(activity_id)
+            activity = await client.get_activity(activity_id=activity_id)
+        rows = _build_rows(streams_data)
+        data = {
+            "activity_id": activity_id,
+            "activity": activity.model_dump(mode="json") if hasattr(activity, "model_dump") else {},
+            "summary": _summary(rows),
+            "distance_splits": _splits(rows, split_distance_m),
+            "time_splits": _time_splits(rows, split_time_s),
+            "hr_zones": _hr_zones(rows, hr_zones_json),
+            "hr_drift": _hr_drift(rows),
+            "power": _power_metrics(rows, ftp),
+            "best_efforts": _best_efforts(rows),
+            "pauses": _pauses(rows),
+            "surges": _surges(rows, ftp),
+            "available_streams": list(_all_streams(streams_data).keys()),
+            "stream_lengths": {
+                name: len(value)
+                for name, value in _all_streams(streams_data).items()
+                if isinstance(value, list)
+            },
+        }
+        return ResponseBuilder.build_response(data=data, query_type="activity_full_analysis")
+    except json.JSONDecodeError as e:
+        return ResponseBuilder.build_error_response(f"Invalid JSON: {str(e)}", error_type="validation_error")
+    except ICUAPIError as e:
+        return ResponseBuilder.build_error_response(e.message, error_type="api_error")
+    except Exception as e:
+        return ResponseBuilder.build_error_response(
+            f"Unexpected error: {str(e)}", error_type="internal_error"
+        )
+
+
+async def export_activity_data(
+    activity_id: Annotated[str, "Activity ID to export"],
+    include_json: Annotated[
+        str | None,
+        "Optional JSON array: summary, streams, raw_streams, intervals, best_efforts, original_fit, manifest. Defaults to summary/streams/raw_streams/intervals/best_efforts/manifest.",
+    ] = None,
+    compress: Annotated[bool, "If true, return a base64 ZIP bundle. If false, return inline text files."] = True,
+    include_original_fit: Annotated[bool, "Whether to include the original FIT file if available."] = False,
+    ctx: Context | None = None,
+) -> str:
+    """Export an activity data bundle over MCP.
+
+    A remote Render MCP server cannot write files into ChatGPT's /mnt/data.
+    This tool therefore returns either inline text files or a base64 ZIP bundle
+    that ChatGPT can decode/use.
+    """
+    assert ctx is not None
+    config: ICUConfig = ctx.get_state("config")
+    try:
+        include = json.loads(include_json) if include_json else [
+            "summary",
+            "streams",
+            "raw_streams",
+            "intervals",
+            "best_efforts",
+            "manifest",
+        ]
+        if not isinstance(include, list):
+            raise ValueError("include_json must be a JSON array")
+        if include_original_fit and "original_fit" not in include:
+            include.append("original_fit")
+
+        files: dict[str, str | bytes] = {}
+        rows_count: dict[str, int] = {}
+        async with ICUClient(config) as client:
+            activity = await client.get_activity(activity_id=activity_id)
+            streams_data = await client.get_activity_streams(activity_id)
+            rows = _build_rows(streams_data)
+            summary = {
+                "activity_id": activity_id,
+                "activity": activity.model_dump(mode="json") if hasattr(activity, "model_dump") else {},
+                "stream_summary": _summary(rows),
+                "available_streams": list(_all_streams(streams_data).keys()),
+                "stream_lengths": {
+                    name: len(value)
+                    for name, value in _all_streams(streams_data).items()
+                    if isinstance(value, list)
+                },
+            }
+            if "summary" in include:
+                files["summary.json"] = _json_dump(summary)
+            if "streams" in include:
+                files["streams.csv"] = _csv_from_rows(rows)
+                rows_count["streams"] = len(rows)
+            if "raw_streams" in include:
+                files["raw_streams.json"] = _json_dump(_all_streams(streams_data))
+            if "intervals" in include:
+                intervals = await client.get_activity_intervals(activity_id)
+                interval_rows = [
+                    item.model_dump(mode="json") if hasattr(item, "model_dump") else dict(item)
+                    for item in intervals
+                ]
+                files["intervals.json"] = _json_dump(interval_rows)
+                rows_count["intervals"] = len(interval_rows)
+            if "best_efforts" in include:
+                files["best_efforts.json"] = _json_dump(_best_efforts(rows))
+            if "original_fit" in include:
+                try:
+                    files["original.fit"] = await client.download_fit_file(activity_id)
+                except ICUAPIError as e:
+                    files["original_fit_error.txt"] = e.message
+
+        manifest = {
+            "activity_id": activity_id,
+            "files": list(files.keys()),
+            "rows": rows_count,
+            "delivery": "base64_zip" if compress else "inline",
+            "note": "Remote MCP servers cannot write into ChatGPT /mnt/data directly; decode the returned bundle if a physical file is needed.",
+        }
+        files["manifest.json"] = _json_dump(manifest)
+
+        if compress:
+            bundle, size, sha256 = _zip_files(files)
+            return ResponseBuilder.build_response(
+                data={
+                    "activity_id": activity_id,
+                    "bundle_format": "zip_base64",
+                    "bundle_base64": bundle,
+                    "files": list(files.keys()),
+                    "rows": rows_count,
+                    "size_bytes": size,
+                    "sha256": sha256,
+                    "manifest": manifest,
+                },
+                query_type="activity_data_export",
+            )
+
+        text_files = {
+            name: content.decode("latin1") if isinstance(content, bytes) else content
+            for name, content in files.items()
+        }
+        return ResponseBuilder.build_response(
+            data={"activity_id": activity_id, "files": text_files, "rows": rows_count, "manifest": manifest},
+            query_type="activity_data_export",
+        )
+    except json.JSONDecodeError as e:
+        return ResponseBuilder.build_error_response(f"Invalid include_json: {str(e)}", error_type="validation_error")
     except ValueError as e:
         return ResponseBuilder.build_error_response(str(e), error_type="validation_error")
     except ICUAPIError as e:
