@@ -41,4 +41,4 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD python -c "import intervals_icu_mcp; print('ok')" || exit 1
 
 # Run the MCP server
-ENTRYPOINT ["python", "-m", "intervals_icu_mcp.server"]
+ENTRYPOINT ["python", "-m", "intervals_icu_mcp.chatgpt_server"]
