@@ -44,9 +44,9 @@ STEP_LABELS = {
     "seuil": "Threshold",
     "technique": "Technique",
     "drill": "Drill",
-    "recuperation": "Recovery",
-    "recovery": "Recovery",
-    "rest": "Recovery",
+    "recuperation": "Recup",
+    "recovery": "Recup",
+    "rest": "Recup",
     "retour_au_calme": "Cooldown",
     "cooldown": "Cooldown",
     "cool_down": "Cooldown",
@@ -131,20 +131,20 @@ def _seconds_to_pace(seconds: int) -> str:
 
 
 PACE_WARNING = (
-    "Pace targets are written in the Intervals.icu workout text, but current tests "
-    "show they do not become structured intensity targets for the graph/Garmin sync. "
-    "Use heart_rate_percent or heart_rate_zone for reliable Run targets via Intervals, "
-    "or a future Garmin FIT export mode for exact native pace targets."
+    "Pace targets are displayed as Garmin-visible labels, but current tests show "
+    "they do not become structured Intervals intensity targets or intensity graphs. "
+    "Use heart_rate_percent for structured graph/target sync, or implement Garmin "
+    "FIT export for native pace targets."
 )
 
 
-def _target_to_icu(target: Any, sport: str) -> tuple[str, str | None, str | None, bool]:
+def _target_to_icu(target: Any, sport: str) -> tuple[str, str | None, str | None, str | None]:
     if not isinstance(target, dict):
-        return "", None, None, False
+        return "", None, None, None
 
     target_type = str(target.get("type") or "none").lower()
     if target_type in {"none", "open", ""}:
-        return "", None, None, False
+        return "", None, None, None
 
     unit = str(target.get("unit") or "").strip()
     min_value = target.get("min", target.get("min_sec_per_km", target.get("min_sec_per_100m")))
@@ -154,15 +154,25 @@ def _target_to_icu(target: Any, sport: str) -> tuple[str, str | None, str | None
     if target_type in {"pace", "swim_pace", "allure"}:
         if target.get("min_sec_per_100m") is not None or "100m" in unit.lower():
             suffix = "/100m Pace"
+            label_suffix = "/100"
             low = _pace_to_seconds(min_value if min_value is not None else value, "min/100m")
             high = _pace_to_seconds(max_value if max_value is not None else value, "min/100m")
         else:
             suffix = "/km Pace"
+            label_suffix = ""
             low = _pace_to_seconds(min_value if min_value is not None else value, "min/km")
             high = _pace_to_seconds(max_value if max_value is not None else value, "min/km")
         if min_value is not None and max_value is not None and low != high:
-            return f"{_seconds_to_pace(low)}-{_seconds_to_pace(high)}{suffix}", None, PACE_WARNING, True
-        return f"{_seconds_to_pace(low)}{suffix}", None, PACE_WARNING, True
+            pace_range = f"{_seconds_to_pace(low)}-{_seconds_to_pace(high)}"
+        else:
+            pace_range = _seconds_to_pace(low)
+        label_prefix = "S" if sport == "Swim" else "O"
+        return (
+            f"{pace_range}{suffix}",
+            None,
+            PACE_WARNING,
+            f"{label_prefix}{pace_range}{label_suffix}",
+        )
 
     if target_type in {
         "hr",
@@ -176,52 +186,53 @@ def _target_to_icu(target: Any, sport: str) -> tuple[str, str | None, str | None
         "hr_zone",
     }:
         if str(value or "").upper().startswith("Z"):
-            return f"{str(value).upper()} HR", "HR", None, False
+            return f"{str(value).upper()} HR", "HR", None, None
         zone = target.get("zone")
         if target_type in {"heart_rate_zone", "hr_zone"} and zone is not None:
-            return f"Z{zone} HR", "HR", None, False
+            return f"Z{zone} HR", "HR", None, None
         hr_suffix = "% HR" if target_type in {
             "heart_rate_percent",
             "hr_percent",
             "percent_hr",
         } or unit in {"%", "percent", "%hr", "% HR"} else " HR"
         if min_value is not None and max_value is not None:
-            return f"{int(min_value)}-{int(max_value)}{hr_suffix}", "HR", None, False
+            return f"{int(min_value)}-{int(max_value)}{hr_suffix}", "HR", None, None
         if value is not None:
-            return f"{int(value)}{hr_suffix}", "HR", None, False
+            return f"{int(value)}{hr_suffix}", "HR", None, None
         if zone is not None:
-            return f"Z{zone} HR", "HR", None, False
+            return f"Z{zone} HR", "HR", None, None
 
     if target_type in {"power", "puissance", "watts"}:
         if str(value or "").upper().startswith("Z"):
-            return f"{str(value).upper()} Power", "POWER", None, False
+            return f"{str(value).upper()} Power", "POWER", None, None
         if unit in {"%", "percent", "%ftp"}:
             if min_value is not None and max_value is not None:
-                return f"{int(min_value)}-{int(max_value)}%", "POWER", None, False
+                return f"{int(min_value)}-{int(max_value)}%", "POWER", None, None
             if value is not None:
-                return f"{int(value)}%", "POWER", None, False
+                return f"{int(value)}%", "POWER", None, None
         if min_value is not None and max_value is not None:
-            return f"{int(min_value)}-{int(max_value)}w", "POWER", None, False
+            return f"{int(min_value)}-{int(max_value)}w", "POWER", None, None
         if value is not None:
-            return f"{int(value)}w", "POWER", None, False
+            return f"{int(value)}w", "POWER", None, None
         zone = target.get("zone")
         if zone is not None:
-            return f"Z{zone} Power", "POWER", None, False
+            return f"Z{zone} Power", "POWER", None, None
 
     if target_type in {"zone", "garmin_zone"}:
         zone = str(value or target.get("zone") or "").upper()
         metric = str(target.get("metric") or "").lower()
         if metric in {"hr", "heart_rate", "fc"}:
-            return f"{zone if zone.startswith('Z') else 'Z' + zone} HR", "HR", None, False
+            return f"{zone if zone.startswith('Z') else 'Z' + zone} HR", "HR", None, None
         if metric in {"pace", "allure"}:
-            return f"{zone if zone.startswith('Z') else 'Z' + zone} Pace", None, PACE_WARNING, True
+            pace_label = zone if zone.startswith("O") else f"O{zone}"
+            return f"{zone if zone.startswith('Z') else 'Z' + zone} Pace", None, PACE_WARNING, pace_label
         if metric in {"power", "puissance"}:
-            return f"{zone if zone.startswith('Z') else 'Z' + zone} Power", "POWER", None, False
+            return f"{zone if zone.startswith('Z') else 'Z' + zone} Power", "POWER", None, None
         if sport == "Ride":
-            return f"{zone if zone.startswith('Z') else 'Z' + zone} Power", "POWER", None, False
-        return f"{zone if zone.startswith('Z') else 'Z' + zone} HR", "HR", None, False
+            return f"{zone if zone.startswith('Z') else 'Z' + zone} Power", "POWER", None, None
+        return f"{zone if zone.startswith('Z') else 'Z' + zone} HR", "HR", None, None
 
-    return "", None, None, False
+    return "", None, None, None
 
 
 def _step_label(step: dict[str, Any]) -> str:
@@ -243,26 +254,22 @@ def _step_line(step: dict[str, Any], sport: str) -> tuple[str, str | None, int, 
         duration_or_distance = _duration_to_icu(duration)
         distance = 0.0
 
-    target_text, target_metric, warning, pace_text_only = _target_to_icu(step.get("target"), sport)
+    target_text, target_metric, warning, pace_label = _target_to_icu(step.get("target"), sport)
     cadence = step.get("cadence") or step.get("cadence_rpm")
     cadence_text = f" {int(cadence)}rpm" if cadence else ""
     label = _step_label(step)
 
     parts = ["-"]
-    if label:
-        if pace_text_only and sport in {"Run", "Swim"} and target_text:
-            label = f"{label} Objectif {target_text}"
+    if pace_label and sport in {"Run", "Swim"}:
+        parts.append(pace_label)
+    elif label:
         parts.append(label)
-    elif pace_text_only and sport in {"Run", "Swim"} and target_text:
-        parts.append(f"Objectif {target_text}")
     parts.append(duration_or_distance)
     if target_text:
         parts.append(target_text)
     line = " ".join(parts) + cadence_text
 
     comment_parts = []
-    if target_text:
-        comment_parts.append(f"Objectif: {target_text}")
     if step.get("description"):
         comment_parts.append(str(step["description"]).strip())
     if comment_parts:
@@ -306,8 +313,9 @@ def _render_steps(
         repeat = int(step.get("repeat") or 0)
         nested = step.get("steps")
         if repeat and isinstance(nested, list):
-            title = str(step.get("name") or step.get("type") or "Repeat").replace("_", " ").title()
-            lines.append(f"{title} x{repeat}")
+            if lines and lines[-1] != "":
+                lines.append("")
+            lines.append(f"{repeat}x")
             nested_lines, nested_targets, nested_duration, nested_distance, nested_warnings = _render_steps(
                 nested, sport, depth + 1
             )
