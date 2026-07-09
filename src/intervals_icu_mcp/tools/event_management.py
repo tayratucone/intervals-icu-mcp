@@ -416,16 +416,32 @@ async def bulk_delete_events(
                 "Must provide at least one event ID to delete", error_type="validation_error"
             )
 
-        # Type cast after validation
-        ids_list: list[int] = parsed_data  # type: ignore[assignment]
+        ids_list = [int(event_id) for event_id in parsed_data]
 
         async with ICUClient(config) as client:
-            result = await client.bulk_delete_events(ids_list)
+            deleted: list[int] = []
+            failed: list[dict[str, Any]] = []
+            for event_id in ids_list:
+                try:
+                    await client.delete_event(event_id)
+                    deleted.append(event_id)
+                except ICUAPIError as e:
+                    failed.append(
+                        {
+                            "event_id": event_id,
+                            "error": e.message,
+                            "status_code": e.status_code,
+                        }
+                    )
 
             return ResponseBuilder.build_response(
-                data={"deleted_count": len(ids_list), "event_ids": ids_list, "result": result},
+                data={
+                    "deleted_count": len(deleted),
+                    "deleted_event_ids": deleted,
+                    "failed": failed,
+                },
                 query_type="bulk_delete_events",
-                metadata={"message": f"Successfully deleted {len(ids_list)} events"},
+                metadata={"message": f"Deleted {len(deleted)} of {len(ids_list)} events"},
             )
 
     except ICUAPIError as e:
