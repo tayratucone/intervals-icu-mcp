@@ -188,6 +188,100 @@ def _rows_as_arrays(rows: list[dict[str, Any]], columns: list[str]) -> list[list
     return [[row.get(col) for col in columns] for row in rows]
 
 
+def _parse_json_list(value: str | None, field_name: str) -> list[str] | None:
+    if not value:
+        return None
+    parsed = json.loads(value)
+    if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+        raise ValueError(f"{field_name} must be a JSON array of strings")
+    return parsed
+
+
+def _parse_json_dict(value: str | None, field_name: str) -> dict[str, list[str]] | None:
+    if not value:
+        return None
+    parsed = json.loads(value)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{field_name} must be a JSON object")
+    result: dict[str, list[str]] = {}
+    for key, val in parsed.items():
+        if not isinstance(key, str) or not isinstance(val, list) or not all(isinstance(item, str) for item in val):
+            raise ValueError(f"{field_name} must map column names to arrays of aggregation names")
+        result[key] = val
+    return result
+
+
+def _column_unit(column: str) -> str | None:
+    lower = column.lower()
+    if lower in {"index"}:
+        return "row"
+    if lower in {"second", "elapsed_s", "moving_s"} or lower.endswith("_s"):
+        return "s"
+    if "distance" in lower:
+        return "m"
+    if lower in {"lat", "lon"}:
+        return "deg"
+    if "altitude" in lower or "elevation" in lower:
+        return "m"
+    if lower in {"velocity_mps", "speed_mps"}:
+        return "m/s"
+    if lower == "speed_kmh":
+        return "km/h"
+    if "watt" in lower or lower == "power":
+        return "W"
+    if lower in {"hr", "heartrate", "heart_rate"} or "heartrate" in lower:
+        return "bpm"
+    if "cadence" in lower:
+        return "rpm_or_spm"
+    if "grade" in lower:
+        return "%"
+    if "temperature" in lower or lower == "temp":
+        return "C"
+    if "pace" in lower:
+        return "sec/km_or_text"
+    return None
+
+
+def _column_profiles(rows: list[dict[str, Any]], columns: list[str]) -> list[dict[str, Any]]:
+    profiles = []
+    for column in columns:
+        values = [row.get(column) for row in rows]
+        non_null = [value for value in values if value is not None]
+        nums = _valid_numbers(non_null)
+        sample = []
+        for value in non_null:
+            if value not in sample:
+                sample.append(value)
+            if len(sample) >= 3:
+                break
+        profile: dict[str, Any] = {
+            "name": column,
+            "unit": _column_unit(column),
+            "non_null": len(non_null),
+            "numeric": len(nums),
+            "type": "numeric" if nums and len(nums) == len(non_null) else "mixed" if nums else "text_or_boolean",
+            "sample": sample,
+        }
+        if nums:
+            profile.update(
+                {
+                    "min": round(min(nums), 3),
+                    "max": round(max(nums), 3),
+                    "avg": round(mean(nums), 3),
+                }
+            )
+        profiles.append(profile)
+    return profiles
+
+
+def _format_rows(rows: list[dict[str, Any]], columns: list[str], output_format: str) -> dict[str, Any]:
+    if output_format == "csv":
+        return {"format": "csv", "csv": _csv_from_rows(rows, columns)}
+    if output_format == "objects":
+        return {"format": "objects", "rows": [{col: row.get(col) for col in columns} for row in rows]}
+    return {"format": "arrays", "columns": columns, "rows": _rows_as_arrays(rows, columns)}
+
+
 def _non_tabular_streams(streams_data: Any, row_count: int) -> dict[str, int]:
     return {
         name: len(value)
@@ -499,6 +593,273 @@ def _power_metrics(rows: list[dict[str, Any]], ftp: int | None = None) -> dict[s
         data["seconds_above_ftp"] = sum(1 for v in values if v > ftp)
         data["percent_above_ftp"] = round(data["seconds_above_ftp"] / len(values) * 100, 1)
     return data
+
+
+async def get_activity_data_dictionary(
+    activity_id: Annotated[str, "Activity ID to inspect before reading raw data"],
+    ctx: Context | None = None,
+) -> str:
+    """Inspect every available second-by-second field for an activity.
+
+    Use this first whenever the user asks to analyze an activity like a CSV.
+    It returns the complete column list, units, non-null counts, samples, and
+    recommended next calls. Do not conclude that a field is missing until this
+    tool says the field has zero non-null values.
+    """
+    assert ctx is not None
+    config: ICUConfig = ctx.get_state("config")
+    try:
+        async with ICUClient(config) as client:
+            activity = await client.get_activity(activity_id=activity_id)
+            streams_data = await client.get_activity_streams(activity_id)
+        rows = _build_rows(streams_data)
+        columns = _columns_for_rows(rows)
+        data = {
+            "activity_id": activity_id,
+            "activity": activity.model_dump(mode="json") if hasattr(activity, "model_dump") else {},
+            "row_count": len(rows),
+            "columns": _column_profiles(rows, columns),
+            "available_streams": list(_all_streams(streams_data).keys()),
+            "stream_lengths": {
+                name: len(value)
+                for name, value in _all_streams(streams_data).items()
+                if isinstance(value, list)
+            },
+            "non_tabular_streams": _non_tabular_streams(streams_data, len(rows)),
+            "workflow_for_chatgpt": [
+                "For full raw data, call read_activity_data_page repeatedly using next_start_index until it is null.",
+                "For a specific part of the activity, call read_activity_data_window with start_s/end_s.",
+                "For block analysis like every 2 minutes, call aggregate_activity_data with bucket_seconds=120.",
+                "Use columns_json to request any exact columns shown here, e.g. [\"elapsed_s\",\"watts\",\"heartrate\",\"cadence\"].",
+                "Do not invent missing rows. If a page is needed, fetch the next page.",
+            ],
+        }
+        return ResponseBuilder.build_response(data=data, query_type="activity_data_dictionary")
+    except ICUAPIError as e:
+        return ResponseBuilder.build_error_response(e.message, error_type="api_error")
+    except Exception as e:
+        return ResponseBuilder.build_error_response(
+            f"Unexpected error: {str(e)}", error_type="internal_error"
+        )
+
+
+async def read_activity_data_page(
+    activity_id: Annotated[str, "Activity ID to read like a CSV"],
+    columns_json: Annotated[
+        str | None,
+        "Optional JSON array of columns to return. Omit to return every available column.",
+    ] = None,
+    start_index: Annotated[int, "Zero-based row index"] = 0,
+    limit: Annotated[int, "Rows to return, capped at 5000"] = 1000,
+    output_format: Annotated[str, "arrays, objects, or csv"] = "arrays",
+    ctx: Context | None = None,
+) -> str:
+    """Read one page of the activity as raw rows.
+
+    This is the generic CSV replacement. Use it repeatedly with
+    next_start_index to inspect or compute over every second-by-second field.
+    """
+    assert ctx is not None
+    config: ICUConfig = ctx.get_state("config")
+    try:
+        requested = _parse_json_list(columns_json, "columns_json")
+        if output_format not in {"arrays", "objects", "csv"}:
+            raise ValueError("output_format must be arrays, objects, or csv")
+        async with ICUClient(config) as client:
+            streams_data = await client.get_activity_streams(activity_id)
+        rows = _build_rows(streams_data)
+        columns = _columns_for_rows(rows, requested)
+        start_index = max(start_index, 0)
+        limit = max(min(limit, 5000), 1)
+        page = rows[start_index : start_index + limit]
+        next_index = start_index + len(page) if start_index + len(page) < len(rows) else None
+        payload = {
+            "activity_id": activity_id,
+            "start_index": start_index,
+            "limit": limit,
+            "returned_rows": len(page),
+            "total_rows": len(rows),
+            "next_start_index": next_index,
+            "available_columns": _columns_for_rows(rows),
+        }
+        payload.update(_format_rows(page, columns, output_format))
+        return ResponseBuilder.build_response(data=payload, query_type="activity_data_page")
+    except json.JSONDecodeError as e:
+        return ResponseBuilder.build_error_response(f"Invalid JSON: {str(e)}", error_type="validation_error")
+    except ValueError as e:
+        return ResponseBuilder.build_error_response(str(e), error_type="validation_error")
+    except ICUAPIError as e:
+        return ResponseBuilder.build_error_response(e.message, error_type="api_error")
+    except Exception as e:
+        return ResponseBuilder.build_error_response(
+            f"Unexpected error: {str(e)}", error_type="internal_error"
+        )
+
+
+async def read_activity_data_window(
+    activity_id: Annotated[str, "Activity ID to read like a CSV"],
+    start_s: Annotated[int, "Start elapsed second"],
+    end_s: Annotated[int, "End elapsed second"],
+    columns_json: Annotated[
+        str | None,
+        "Optional JSON array of columns to return. Omit to return every available column.",
+    ] = None,
+    output_format: Annotated[str, "arrays, objects, or csv"] = "arrays",
+    ctx: Context | None = None,
+) -> str:
+    """Read raw second-by-second rows for an elapsed-time window."""
+    assert ctx is not None
+    config: ICUConfig = ctx.get_state("config")
+    try:
+        requested = _parse_json_list(columns_json, "columns_json")
+        if output_format not in {"arrays", "objects", "csv"}:
+            raise ValueError("output_format must be arrays, objects, or csv")
+        async with ICUClient(config) as client:
+            streams_data = await client.get_activity_streams(activity_id)
+        all_rows = _build_rows(streams_data)
+        rows = [
+            row for row in all_rows
+            if start_s <= int(row.get("elapsed_s") or row.get("second") or 0) <= end_s
+        ]
+        columns = _columns_for_rows(all_rows, requested)
+        payload = {
+            "activity_id": activity_id,
+            "start_s": start_s,
+            "end_s": end_s,
+            "returned_rows": len(rows),
+            "available_columns": _columns_for_rows(all_rows),
+        }
+        payload.update(_format_rows(rows, columns, output_format))
+        return ResponseBuilder.build_response(data=payload, query_type="activity_data_window")
+    except json.JSONDecodeError as e:
+        return ResponseBuilder.build_error_response(f"Invalid JSON: {str(e)}", error_type="validation_error")
+    except ValueError as e:
+        return ResponseBuilder.build_error_response(str(e), error_type="validation_error")
+    except ICUAPIError as e:
+        return ResponseBuilder.build_error_response(e.message, error_type="api_error")
+    except Exception as e:
+        return ResponseBuilder.build_error_response(
+            f"Unexpected error: {str(e)}", error_type="internal_error"
+        )
+
+
+async def aggregate_activity_data(
+    activity_id: Annotated[str, "Activity ID to aggregate like a dataframe"],
+    bucket_seconds: Annotated[int | None, "Group rows by elapsed-time bucket size in seconds"] = None,
+    bucket_distance_m: Annotated[int | None, "Group rows by distance bucket size in meters"] = None,
+    columns_json: Annotated[
+        str | None,
+        "Optional JSON array of columns. Omit to aggregate every numeric column.",
+    ] = None,
+    aggregations_json: Annotated[
+        str | None,
+        "Optional JSON object mapping columns to aggregations, e.g. {\"watts\":[\"avg\",\"max\"],\"heartrate\":[\"avg\"]}. Supported: avg,min,max,sum,first,last,count,delta.",
+    ] = None,
+    ctx: Context | None = None,
+) -> str:
+    """Generic aggregation over any activity stream columns.
+
+    This is intentionally not a coach-specific analysis. It lets ChatGPT do
+    CSV-like operations such as every-120-second blocks over any columns
+    present in the activity.
+    """
+    assert ctx is not None
+    config: ICUConfig = ctx.get_state("config")
+    try:
+        if bucket_seconds and bucket_distance_m:
+            raise ValueError("Use either bucket_seconds or bucket_distance_m, not both")
+        requested = _parse_json_list(columns_json, "columns_json")
+        aggregation_map = _parse_json_dict(aggregations_json, "aggregations_json")
+        async with ICUClient(config) as client:
+            streams_data = await client.get_activity_streams(activity_id)
+        rows = _build_rows(streams_data)
+        all_columns = _columns_for_rows(rows)
+        numeric_columns = [
+            column for column in all_columns
+            if _valid_numbers([row.get(column) for row in rows])
+        ]
+        columns = requested or numeric_columns
+        default_aggs = ["avg", "min", "max", "first", "last", "count"]
+        buckets: dict[int, list[dict[str, Any]]] = {}
+        for row in rows:
+            if bucket_distance_m:
+                distance = row.get("distance_m")
+                if not isinstance(distance, (int, float)):
+                    continue
+                bucket = int(distance // bucket_distance_m)
+            else:
+                elapsed = int(row.get("elapsed_s") or row.get("second") or 0)
+                size = bucket_seconds or max(int(rows[-1].get("elapsed_s") or len(rows)), 1)
+                bucket = elapsed // size
+            buckets.setdefault(bucket, []).append(row)
+
+        result = []
+        for bucket, bucket_rows in sorted(buckets.items()):
+            if not bucket_rows:
+                continue
+            item: dict[str, Any] = {
+                "bucket": bucket,
+                "start_index": bucket_rows[0].get("index"),
+                "end_index": bucket_rows[-1].get("index"),
+                "start_s": bucket_rows[0].get("elapsed_s"),
+                "end_s": bucket_rows[-1].get("elapsed_s"),
+                "duration_s": (bucket_rows[-1].get("elapsed_s") or 0) - (bucket_rows[0].get("elapsed_s") or 0),
+                "start_distance_m": bucket_rows[0].get("distance_m"),
+                "end_distance_m": bucket_rows[-1].get("distance_m"),
+                "rows": len(bucket_rows),
+            }
+            for column in columns:
+                aggs = aggregation_map.get(column, default_aggs) if aggregation_map else default_aggs
+                values = [row.get(column) for row in bucket_rows]
+                nums = _valid_numbers(values)
+                non_null = [value for value in values if value is not None]
+                for agg in aggs:
+                    key = f"{column}_{agg}"
+                    if agg == "count":
+                        item[key] = len(non_null)
+                    elif agg == "first":
+                        item[key] = non_null[0] if non_null else None
+                    elif agg == "last":
+                        item[key] = non_null[-1] if non_null else None
+                    elif agg == "delta":
+                        item[key] = round(nums[-1] - nums[0], 3) if len(nums) >= 2 else None
+                    elif not nums:
+                        item[key] = None
+                    elif agg == "avg":
+                        item[key] = round(mean(nums), 3)
+                    elif agg == "min":
+                        item[key] = round(min(nums), 3)
+                    elif agg == "max":
+                        item[key] = round(max(nums), 3)
+                    elif agg == "sum":
+                        item[key] = round(sum(nums), 3)
+                    else:
+                        raise ValueError(f"Unsupported aggregation: {agg}")
+            result.append(item)
+
+        return ResponseBuilder.build_response(
+            data={
+                "activity_id": activity_id,
+                "grouping": {
+                    "bucket_seconds": bucket_seconds,
+                    "bucket_distance_m": bucket_distance_m,
+                },
+                "columns": columns,
+                "available_columns": all_columns,
+                "buckets": result,
+            },
+            query_type="activity_data_aggregation",
+        )
+    except json.JSONDecodeError as e:
+        return ResponseBuilder.build_error_response(f"Invalid JSON: {str(e)}", error_type="validation_error")
+    except ValueError as e:
+        return ResponseBuilder.build_error_response(str(e), error_type="validation_error")
+    except ICUAPIError as e:
+        return ResponseBuilder.build_error_response(e.message, error_type="api_error")
+    except Exception as e:
+        return ResponseBuilder.build_error_response(
+            f"Unexpected error: {str(e)}", error_type="internal_error"
+        )
 
 
 async def analyze_activity_streams(
