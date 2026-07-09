@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: intervals-icu-mcp-chatgpt
+    runtime: docker
+    plan: free
+    envVars:
+      - key: INTERVALS_ICU_API_KEY
+        sync: false
+      - key: INTERVALS_ICU_ATHLETE_ID
+        sync: false
+      - key: MCP_PATH
+        value: /mcp-loic-intervals-icu-7c42
+      - key: HOST
+        value: 0.0.0.0
+      - key: PORT
+        value: 8080
