@@ -734,9 +734,17 @@ class ICUClient:
                 if not isinstance(item, dict):
                     continue
                 stream_name = item.get("type") or item.get("name")
-                stream_data = item.get("data") or item.get("values") or item.get("stream")
+                stream_data = None
+                for data_key in ("data", "values", "stream"):
+                    if data_key in item:
+                        stream_data = item[data_key]
+                        break
                 if stream_name and stream_data is not None:
-                    streams_payload[str(stream_name)] = stream_data
+                    stream_key = str(stream_name)
+                    streams_payload[stream_key] = stream_data
+                    if stream_key in {"power", "watts", "fixed_watts", "raw_watts"}:
+                        streams_payload["raw_watts"] = stream_data
+                        streams_payload.setdefault("watts", stream_data)
                 else:
                     streams_payload.update(item)
             payload = streams_payload
