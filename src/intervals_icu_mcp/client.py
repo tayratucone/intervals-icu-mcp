@@ -569,6 +569,7 @@ class ICUClient:
         athlete_id: str | None = None,
         oldest: str | None = None,
         newest: str | None = None,
+        sport_type: str = "Ride",
     ) -> PowerCurve:
         """Get power curve data (best efforts for various durations).
 
@@ -576,20 +577,31 @@ class ICUClient:
             athlete_id: Athlete ID (uses config default if not provided)
             oldest: Oldest date to include (ISO-8601 format)
             newest: Newest date to include (ISO-8601 format)
+            sport_type: Activity type filter, e.g. Ride, Run, Swim
 
         Returns:
             PowerCurve with best efforts data
         """
+        from datetime import date as _date
+
         athlete_id = athlete_id or self.config.intervals_icu_athlete_id
-        params = {}
 
         if oldest:
-            params["oldest"] = oldest
-        if newest:
-            params["newest"] = newest
+            end = newest or _date.today().isoformat()
+            curves = f"r.{oldest}.{end}"
+        else:
+            curves = "1y"
 
-        response = await self._request("GET", f"/athlete/{athlete_id}/power-curves", params=params)
-        return PowerCurve(**response.json())
+        params = {"type": sport_type, "curves": curves}
+
+        response = await self._request(
+            "GET", f"/athlete/{athlete_id}/power-curves.json", params=params
+        )
+        payload = response.json()
+        curves_list = payload.get("list", []) if isinstance(payload, dict) else []
+        if curves_list:
+            return PowerCurve(**curves_list[0])
+        return PowerCurve()
 
     async def get_hr_curves(
         self,
@@ -683,8 +695,17 @@ class ICUClient:
             List of Interval objects
         """
         response = await self._request("GET", f"/activity/{activity_id}/intervals")
+        payload = response.json()
+        if isinstance(payload, dict):
+            for key in ("intervals", "laps", "sets"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    payload = value
+                    break
+            else:
+                payload = []
         adapter = TypeAdapter(list[Interval])
-        return adapter.validate_python(response.json())
+        return adapter.validate_python(payload)
 
     async def get_activity_streams(
         self,
@@ -706,7 +727,20 @@ class ICUClient:
             params["types"] = ",".join(streams)
 
         response = await self._request("GET", f"/activity/{activity_id}/streams", params=params)
-        return ActivityStreams(**response.json())
+        payload = response.json()
+        if isinstance(payload, list):
+            streams_payload: dict[str, Any] = {}
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                stream_name = item.get("type") or item.get("name")
+                stream_data = item.get("data") or item.get("values") or item.get("stream")
+                if stream_name and stream_data is not None:
+                    streams_payload[str(stream_name)] = stream_data
+                else:
+                    streams_payload.update(item)
+            payload = streams_payload
+        return ActivityStreams(**payload)
 
     async def get_best_efforts(
         self,
@@ -777,9 +811,19 @@ class ICUClient:
             List of Workout objects
         """
         athlete_id = athlete_id or self.config.intervals_icu_athlete_id
-        response = await self._request("GET", f"/athlete/{athlete_id}/folders/{folder_id}/workouts")
         adapter = TypeAdapter(list[Workout])
-        return adapter.validate_python(response.json())
+        try:
+            response = await self._request(
+                "GET", f"/athlete/{athlete_id}/folders/{folder_id}/workouts"
+            )
+            return adapter.validate_python(response.json())
+        except ICUAPIError as e:
+            if e.status_code != 405:
+                raise
+
+        response = await self._request("GET", f"/athlete/{athlete_id}/workouts")
+        workouts = adapter.validate_python(response.json())
+        return [workout for workout in workouts if workout.folder_id == folder_id]
 
     # ==================== Event Write Operations ====================
 
@@ -1089,7 +1133,10 @@ class ICUClient:
         """
         athlete_id = athlete_id or self.config.intervals_icu_athlete_id
         response = await self._request(
-            "POST", f"/athlete/{athlete_id}/events/bulk", json=events_data
+            "POST",
+            f"/athlete/{athlete_id}/events/bulk",
+            params={"upsert": "true"},
+            json=events_data,
         )
         adapter = TypeAdapter(list[Event])
         return adapter.validate_python(response.json())
