@@ -67,7 +67,14 @@ from .tools.sport_settings import (
     update_sport_settings,
 )
 from .tools.structured_workouts import create_structured_workout
-from .tools.stream_analysis import analyze_activity_streams, get_activity_streams_table
+from .tools.stream_analysis import (
+    analyze_activity_full,
+    analyze_activity_streams,
+    export_activity_data,
+    get_activity_streams_page,
+    get_activity_streams_table,
+    get_activity_streams_window,
+)
 from .tools.wellness import get_wellness_data, get_wellness_for_date, update_wellness
 from .tools.workout_library import get_workout_library, get_workouts_in_folder
 
@@ -94,6 +101,10 @@ mcp.tool()(get_pace_histogram)
 mcp.tool()(get_gap_histogram)
 mcp.tool()(analyze_activity_streams)
 mcp.tool()(get_activity_streams_table)
+mcp.tool()(get_activity_streams_page)
+mcp.tool()(get_activity_streams_window)
+mcp.tool()(analyze_activity_full)
+mcp.tool()(export_activity_data)
 
 # Register athlete tools
 mcp.tool()(get_athlete_profile)
