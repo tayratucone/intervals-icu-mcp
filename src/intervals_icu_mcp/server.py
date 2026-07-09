@@ -66,6 +66,7 @@ from .tools.sport_settings import (
     get_sport_settings,
     update_sport_settings,
 )
+from .tools.structured_workouts import create_structured_workout
 from .tools.wellness import get_wellness_data, get_wellness_for_date, update_wellness
 from .tools.workout_library import get_workout_library, get_workouts_in_folder
 
@@ -110,6 +111,7 @@ mcp.tool()(delete_event)
 mcp.tool()(bulk_create_events)
 mcp.tool()(bulk_delete_events)
 mcp.tool()(duplicate_event)
+mcp.tool()(create_structured_workout)
 
 # Register performance/curve tools
 mcp.tool()(get_power_curves)
