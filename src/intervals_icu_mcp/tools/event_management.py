@@ -1,17 +1,17 @@
 """Event/calendar management tools for Intervals.icu MCP server."""
 
-from datetime import datetime
 from typing import Annotated, Any
 
 from fastmcp import Context
 
 from ..auth import ICUConfig
 from ..client import ICUAPIError, ICUClient
+from ..date_utils import parse_date, start_datetime
 from ..response_builder import ResponseBuilder
 
 
 async def create_event(
-    start_date: Annotated[str, "Start date in YYYY-MM-DD format"],
+    start_date: Annotated[str, "Start date in YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS format"],
     name: Annotated[str, "Event name"],
     category: Annotated[str, "Event category: WORKOUT, NOTE, RACE, or GOAL"],
     description: Annotated[str | None, "Event description (optional)"] = None,
@@ -27,7 +27,7 @@ async def create_event(
     planned metrics, notes for tracking information, races, or training goals.
 
     Args:
-        start_date: Date in ISO-8601 format (YYYY-MM-DD)
+        start_date: Date in ISO-8601 format (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)
         name: Name of the event
         category: Type of event - WORKOUT, NOTE, RACE, or GOAL
         description: Optional detailed description
@@ -52,17 +52,17 @@ async def create_event(
 
     # Validate date format
     try:
-        datetime.strptime(start_date, "%Y-%m-%d")
+        parse_date(start_date)
     except ValueError:
         return ResponseBuilder.build_error_response(
-            "Invalid date format. Please use YYYY-MM-DD format.",
+            "Invalid date format. Please use YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS format.",
             error_type="validation_error",
         )
 
     try:
         # Build event data
         event_data: dict[str, Any] = {
-            "start_date_local": start_date,
+            "start_date_local": start_datetime(start_date),
             "name": name,
             "category": category.upper(),
         }
@@ -117,7 +117,7 @@ async def update_event(
     event_id: Annotated[int, "Event ID to update"],
     name: Annotated[str | None, "Updated event name"] = None,
     description: Annotated[str | None, "Updated description"] = None,
-    start_date: Annotated[str | None, "Updated start date (YYYY-MM-DD)"] = None,
+    start_date: Annotated[str | None, "Updated start date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)"] = None,
     event_type: Annotated[str | None, "Updated activity type"] = None,
     duration_seconds: Annotated[int | None, "Updated duration in seconds"] = None,
     distance_meters: Annotated[float | None, "Updated distance in meters"] = None,
@@ -133,7 +133,7 @@ async def update_event(
         event_id: ID of the event to update
         name: New name for the event
         description: New description
-        start_date: New start date in YYYY-MM-DD format
+        start_date: New start date in YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS format
         event_type: New activity type
         duration_seconds: New planned duration
         distance_meters: New planned distance
@@ -148,10 +148,10 @@ async def update_event(
     # Validate date format if provided
     if start_date:
         try:
-            datetime.strptime(start_date, "%Y-%m-%d")
+            parse_date(start_date)
         except ValueError:
             return ResponseBuilder.build_error_response(
-                "Invalid date format. Please use YYYY-MM-DD format.",
+                "Invalid date format. Please use YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS format.",
                 error_type="validation_error",
             )
 
@@ -164,7 +164,7 @@ async def update_event(
         if description is not None:
             event_data["description"] = description
         if start_date is not None:
-            event_data["start_date_local"] = start_date
+            event_data["start_date_local"] = start_datetime(start_date)
         if event_type is not None:
             event_data["type"] = event_type
         if duration_seconds is not None:
@@ -258,8 +258,8 @@ async def delete_event(
 
 async def bulk_create_events(
     events: Annotated[
-        str,
-        "JSON string containing array of events. Each event should have: start_date_local, name, category, and optional fields like description, type, moving_time, distance, icu_training_load",
+        str | list[dict[str, Any]],
+        "JSON array or JSON string containing events. Each event should have: start_date_local, name, category, and optional fields like description, type, moving_time, distance, icu_training_load",
     ],
     ctx: Context | None = None,
 ) -> str:
@@ -269,7 +269,7 @@ async def bulk_create_events(
     of event objects, each with the same structure as create_event.
 
     Args:
-        events: JSON array of event objects to create
+        events: JSON array, or JSON string array, of event objects to create
 
     Returns:
         JSON string with created events
@@ -280,13 +280,16 @@ async def bulk_create_events(
     try:
         import json
 
-        # Parse the JSON string
-        try:
-            parsed_data = json.loads(events)
-        except json.JSONDecodeError as e:
-            return ResponseBuilder.build_error_response(
-                f"Invalid JSON format: {str(e)}", error_type="validation_error"
-            )
+        # Parse JSON strings, but also accept native lists from MCP clients.
+        if isinstance(events, str):
+            try:
+                parsed_data = json.loads(events)
+            except json.JSONDecodeError as e:
+                return ResponseBuilder.build_error_response(
+                    f"Invalid JSON format: {str(e)}", error_type="validation_error"
+                )
+        else:
+            parsed_data = events
 
         if not isinstance(parsed_data, list):
             return ResponseBuilder.build_error_response(
@@ -324,12 +327,13 @@ async def bulk_create_events(
 
             # Validate date format
             try:
-                datetime.strptime(event_data["start_date_local"], "%Y-%m-%d")
+                parse_date(event_data["start_date_local"])
             except ValueError:
                 return ResponseBuilder.build_error_response(
-                    f"Event {i}: Invalid date format. Please use YYYY-MM-DD format.",
+                    f"Event {i}: Invalid date format. Please use YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS format.",
                     error_type="validation_error",
                 )
+            event_data["start_date_local"] = start_datetime(event_data["start_date_local"])
 
         async with ICUClient(config) as client:
             created_events = await client.bulk_create_events(events_data)
@@ -434,7 +438,7 @@ async def bulk_delete_events(
 
 async def duplicate_event(
     event_id: Annotated[int, "Event ID to duplicate"],
-    new_date: Annotated[str, "New date for the duplicated event (YYYY-MM-DD format)"],
+    new_date: Annotated[str, "New date for the duplicated event (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS format)"],
     ctx: Context | None = None,
 ) -> str:
     """Duplicate an existing event to a new date.
@@ -444,7 +448,7 @@ async def duplicate_event(
 
     Args:
         event_id: ID of the event to duplicate
-        new_date: New date in YYYY-MM-DD format
+        new_date: New date in YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS format
 
     Returns:
         JSON string with the duplicated event
@@ -454,16 +458,16 @@ async def duplicate_event(
 
     # Validate date format
     try:
-        datetime.strptime(new_date, "%Y-%m-%d")
+        parse_date(new_date)
     except ValueError:
         return ResponseBuilder.build_error_response(
-            "Invalid date format. Please use YYYY-MM-DD format.",
+            "Invalid date format. Please use YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS format.",
             error_type="validation_error",
         )
 
     try:
         async with ICUClient(config) as client:
-            duplicated_event = await client.duplicate_event(event_id, new_date)
+            duplicated_event = await client.duplicate_event(event_id, start_datetime(new_date))
 
             event_result: dict[str, Any] = {
                 "id": duplicated_event.id,
