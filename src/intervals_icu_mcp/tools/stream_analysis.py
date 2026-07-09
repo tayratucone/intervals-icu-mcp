@@ -14,6 +14,8 @@ from ..response_builder import ResponseBuilder
 STREAMS = [
     "time",
     "distance",
+    "watts",
+    "power",
     "heartrate",
     "cadence",
     "velocity_smooth",
@@ -21,6 +23,14 @@ STREAMS = [
     "grade_smooth",
     "moving",
 ]
+
+
+def _all_streams(streams_data: Any) -> dict[str, Any]:
+    if hasattr(streams_data, "model_dump"):
+        payload = streams_data.model_dump(exclude_none=True)
+    else:
+        payload = getattr(streams_data, "__dict__", {})
+    return {key: value for key, value in payload.items() if value is not None}
 
 
 def _seq(value: Any) -> list[Any]:
@@ -54,18 +64,23 @@ def _pace_from_speed(speed_mps: float | None) -> float | None:
 
 
 def _build_rows(streams_data: Any) -> list[dict[str, Any]]:
+    all_streams = _all_streams(streams_data)
     time = _seq(getattr(streams_data, "time", None))
     distance = _seq(getattr(streams_data, "distance", None))
     hr = _seq(getattr(streams_data, "heartrate", None))
     cadence = _seq(getattr(streams_data, "cadence", None))
+    watts = _seq(getattr(streams_data, "watts", None))
+    power_alias = _seq(getattr(streams_data, "power", None))
+    raw_watts = _seq(getattr(streams_data, "raw_watts", None))
+    fixed_watts = _seq(getattr(streams_data, "fixed_watts", None))
+    power = watts or power_alias or raw_watts or fixed_watts
     speed = _seq(getattr(streams_data, "velocity_smooth", None))
     altitude = _seq(getattr(streams_data, "altitude", None))
     grade = _seq(getattr(streams_data, "grade_smooth", None))
     moving = _seq(getattr(streams_data, "moving", None))
 
-    length = max(
-        len(time), len(distance), len(hr), len(cadence), len(speed), len(altitude), len(grade), len(moving)
-    )
+    list_streams = {name: value for name, value in all_streams.items() if isinstance(value, list)}
+    length = max([len(value) for value in list_streams.values()] or [0])
     rows: list[dict[str, Any]] = []
     for i in range(length):
         speed_value = _safe(speed[i]) if i < len(speed) else None
@@ -82,6 +97,7 @@ def _build_rows(streams_data: Any) -> list[dict[str, Any]]:
                 "cadence": round(float(cadence[i]), 1)
                 if i < len(cadence) and isinstance(cadence[i], (int, float))
                 else None,
+                "watts": int(power[i]) if i < len(power) and isinstance(power[i], (int, float)) else None,
                 "speed_mps": round(speed_value, 3) if speed_value is not None else None,
                 "altitude_m": round(float(altitude[i]), 1)
                 if i < len(altitude) and isinstance(altitude[i], (int, float))
@@ -92,6 +108,11 @@ def _build_rows(streams_data: Any) -> list[dict[str, Any]]:
                 "moving": bool(moving[i]) if i < len(moving) and moving[i] is not None else None,
             }
         )
+        for stream_name, stream_values in list_streams.items():
+            if stream_name in rows[-1]:
+                continue
+            if len(stream_values) == length and i < len(stream_values):
+                rows[-1][stream_name] = stream_values[i]
     return rows
 
 
@@ -126,6 +147,8 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "avg_hr": _avg([row.get("hr") for row in moving]),
         "max_hr": max(_valid_numbers([row.get("hr") for row in moving]), default=None),
         "avg_cadence": _avg([row.get("cadence") for row in moving]),
+        "avg_watts": _avg([row.get("watts") for row in moving]),
+        "max_watts": max(_valid_numbers([row.get("watts") for row in moving]), default=None),
         "elevation_gain_m": round(elevation_gain, 1),
         "elevation_loss_m": round(elevation_loss, 1),
     }
@@ -169,6 +192,7 @@ def _splits(rows: list[dict[str, Any]], split_distance_m: int) -> list[dict[str,
                 "pace": _format_pace(pace),
                 "avg_hr": _avg([row.get("hr") for row in chunk]),
                 "avg_cadence": _avg([row.get("cadence") for row in chunk]),
+                "avg_watts": _avg([row.get("watts") for row in chunk]),
                 "elevation_gain_m": _elevation_gain(chunk),
             }
         )
@@ -231,6 +255,7 @@ def _best_efforts(rows: list[dict[str, Any]]) -> dict[str, Any]:
                     "pace_sec_per_km": round(pace, 1),
                     "pace": _format_pace(pace),
                     "avg_hr": _avg([row.get("hr") for row in chunk]),
+                    "avg_watts": _avg([row.get("watts") for row in chunk]),
                 }
         efforts[f"{duration}_sec"] = best
     return efforts
@@ -274,7 +299,7 @@ async def analyze_activity_streams(
 
     try:
         async with ICUClient(config) as client:
-            streams_data = await client.get_activity_streams(activity_id, STREAMS)
+            streams_data = await client.get_activity_streams(activity_id)
         rows = _build_rows(streams_data)
         if not rows:
             return ResponseBuilder.build_response(
@@ -288,7 +313,18 @@ async def analyze_activity_streams(
             "hr_drift": _hr_drift(rows),
             "best_efforts": _best_efforts(rows),
             "hr_zones": _hr_zones(rows, hr_zones_json),
-            "available_streams": [name for name in STREAMS if _seq(getattr(streams_data, name, None))],
+            "available_streams": list(_all_streams(streams_data).keys()),
+            "stream_lengths": {
+                name: len(value)
+                for name, value in _all_streams(streams_data).items()
+                if isinstance(value, list)
+            },
+            "power_stream_available": bool(
+                _seq(getattr(streams_data, "watts", None))
+                or _seq(getattr(streams_data, "power", None))
+                or _seq(getattr(streams_data, "raw_watts", None))
+                or _seq(getattr(streams_data, "fixed_watts", None))
+            ),
         }
         return ResponseBuilder.build_response(data=data, query_type="activity_stream_analysis")
     except json.JSONDecodeError as e:
@@ -316,14 +352,25 @@ async def get_activity_streams_table(
 
     try:
         async with ICUClient(config) as client:
-            streams_data = await client.get_activity_streams(activity_id, STREAMS)
+            streams_data = await client.get_activity_streams(activity_id)
         rows = _build_rows(streams_data)
         total = len(rows)
         if max_rows and total > max_rows:
             step = max(total // max_rows, 1)
             rows = rows[::step][:max_rows]
         return ResponseBuilder.build_response(
-            data={"activity_id": activity_id, "total_rows": total, "returned_rows": len(rows), "rows": rows},
+            data={
+                "activity_id": activity_id,
+                "total_rows": total,
+                "returned_rows": len(rows),
+                "available_streams": list(_all_streams(streams_data).keys()),
+                "stream_lengths": {
+                    name: len(value)
+                    for name, value in _all_streams(streams_data).items()
+                    if isinstance(value, list)
+                },
+                "rows": rows,
+            },
             query_type="activity_streams_table",
         )
     except ICUAPIError as e:
