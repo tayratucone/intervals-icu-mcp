@@ -130,13 +130,21 @@ def _seconds_to_pace(seconds: int) -> str:
     return f"{minutes}:{secs:02d}"
 
 
-def _target_to_icu(target: Any, sport: str) -> tuple[str, str | None]:
+PACE_WARNING = (
+    "Pace targets are written in the Intervals.icu workout text, but current tests "
+    "show they do not become structured intensity targets for the graph/Garmin sync. "
+    "Use heart_rate_percent or heart_rate_zone for reliable Run targets via Intervals, "
+    "or a future Garmin FIT export mode for exact native pace targets."
+)
+
+
+def _target_to_icu(target: Any, sport: str) -> tuple[str, str | None, str | None, bool]:
     if not isinstance(target, dict):
-        return "", None
+        return "", None, None, False
 
     target_type = str(target.get("type") or "none").lower()
     if target_type in {"none", "open", ""}:
-        return "", None
+        return "", None, None, False
 
     unit = str(target.get("unit") or "").strip()
     min_value = target.get("min", target.get("min_sec_per_km", target.get("min_sec_per_100m")))
@@ -153,50 +161,67 @@ def _target_to_icu(target: Any, sport: str) -> tuple[str, str | None]:
             low = _pace_to_seconds(min_value if min_value is not None else value, "min/km")
             high = _pace_to_seconds(max_value if max_value is not None else value, "min/km")
         if min_value is not None and max_value is not None and low != high:
-            return f"{_seconds_to_pace(low)}-{_seconds_to_pace(high)}{suffix}", "PACE"
-        return f"{_seconds_to_pace(low)}{suffix}", "PACE"
+            return f"{_seconds_to_pace(low)}-{_seconds_to_pace(high)}{suffix}", None, PACE_WARNING, True
+        return f"{_seconds_to_pace(low)}{suffix}", None, PACE_WARNING, True
 
-    if target_type in {"hr", "heart_rate", "heartrate", "fc"}:
+    if target_type in {
+        "hr",
+        "heart_rate",
+        "heartrate",
+        "fc",
+        "heart_rate_percent",
+        "hr_percent",
+        "percent_hr",
+        "heart_rate_zone",
+        "hr_zone",
+    }:
         if str(value or "").upper().startswith("Z"):
-            return f"{str(value).upper()} HR", "HR"
-        if min_value is not None and max_value is not None:
-            return f"{int(min_value)}-{int(max_value)} HR", "HR"
-        if value is not None:
-            return f"{int(value)} HR", "HR"
+            return f"{str(value).upper()} HR", "HR", None, False
         zone = target.get("zone")
+        if target_type in {"heart_rate_zone", "hr_zone"} and zone is not None:
+            return f"Z{zone} HR", "HR", None, False
+        hr_suffix = "% HR" if target_type in {
+            "heart_rate_percent",
+            "hr_percent",
+            "percent_hr",
+        } or unit in {"%", "percent", "%hr", "% HR"} else " HR"
+        if min_value is not None and max_value is not None:
+            return f"{int(min_value)}-{int(max_value)}{hr_suffix}", "HR", None, False
+        if value is not None:
+            return f"{int(value)}{hr_suffix}", "HR", None, False
         if zone is not None:
-            return f"Z{zone} HR", "HR"
+            return f"Z{zone} HR", "HR", None, False
 
     if target_type in {"power", "puissance", "watts"}:
         if str(value or "").upper().startswith("Z"):
-            return f"{str(value).upper()} Power", "POWER"
+            return f"{str(value).upper()} Power", "POWER", None, False
         if unit in {"%", "percent", "%ftp"}:
             if min_value is not None and max_value is not None:
-                return f"{int(min_value)}-{int(max_value)}%", "POWER"
+                return f"{int(min_value)}-{int(max_value)}%", "POWER", None, False
             if value is not None:
-                return f"{int(value)}%", "POWER"
+                return f"{int(value)}%", "POWER", None, False
         if min_value is not None and max_value is not None:
-            return f"{int(min_value)}-{int(max_value)}w", "POWER"
+            return f"{int(min_value)}-{int(max_value)}w", "POWER", None, False
         if value is not None:
-            return f"{int(value)}w", "POWER"
+            return f"{int(value)}w", "POWER", None, False
         zone = target.get("zone")
         if zone is not None:
-            return f"Z{zone} Power", "POWER"
+            return f"Z{zone} Power", "POWER", None, False
 
     if target_type in {"zone", "garmin_zone"}:
         zone = str(value or target.get("zone") or "").upper()
         metric = str(target.get("metric") or "").lower()
         if metric in {"hr", "heart_rate", "fc"}:
-            return f"{zone if zone.startswith('Z') else 'Z' + zone} HR", "HR"
+            return f"{zone if zone.startswith('Z') else 'Z' + zone} HR", "HR", None, False
         if metric in {"pace", "allure"}:
-            return f"{zone if zone.startswith('Z') else 'Z' + zone} Pace", "PACE"
+            return f"{zone if zone.startswith('Z') else 'Z' + zone} Pace", None, PACE_WARNING, True
         if metric in {"power", "puissance"}:
-            return f"{zone if zone.startswith('Z') else 'Z' + zone} Power", "POWER"
+            return f"{zone if zone.startswith('Z') else 'Z' + zone} Power", "POWER", None, False
         if sport == "Ride":
-            return f"{zone if zone.startswith('Z') else 'Z' + zone} Power", "POWER"
-        return f"{zone if zone.startswith('Z') else 'Z' + zone} Pace", "PACE"
+            return f"{zone if zone.startswith('Z') else 'Z' + zone} Power", "POWER", None, False
+        return f"{zone if zone.startswith('Z') else 'Z' + zone} HR", "HR", None, False
 
-    return "", None
+    return "", None, None, False
 
 
 def _step_label(step: dict[str, Any]) -> str:
@@ -204,7 +229,7 @@ def _step_label(step: dict[str, Any]) -> str:
     return STEP_LABELS.get(raw.lower(), raw.replace("_", " ").title()) if raw else ""
 
 
-def _step_line(step: dict[str, Any], sport: str) -> tuple[str, str | None, int, float]:
+def _step_line(step: dict[str, Any], sport: str) -> tuple[str, str | None, int, float, list[str]]:
     if step.get("distance") is not None:
         duration_or_distance = _distance_to_icu(step["distance"])
         distance = float(step["distance"])
@@ -218,14 +243,18 @@ def _step_line(step: dict[str, Any], sport: str) -> tuple[str, str | None, int, 
         duration_or_distance = _duration_to_icu(duration)
         distance = 0.0
 
-    target_text, target_metric = _target_to_icu(step.get("target"), sport)
+    target_text, target_metric, warning, pace_text_only = _target_to_icu(step.get("target"), sport)
     cadence = step.get("cadence") or step.get("cadence_rpm")
     cadence_text = f" {int(cadence)}rpm" if cadence else ""
     label = _step_label(step)
 
     parts = ["-"]
     if label:
+        if pace_text_only and sport in {"Run", "Swim"} and target_text:
+            label = f"{label} Objectif {target_text}"
         parts.append(label)
+    elif pace_text_only and sport in {"Run", "Swim"} and target_text:
+        parts.append(f"Objectif {target_text}")
     parts.append(duration_or_distance)
     if target_text:
         parts.append(target_text)
@@ -239,7 +268,8 @@ def _step_line(step: dict[str, Any], sport: str) -> tuple[str, str | None, int, 
     if comment_parts:
         line += " | " + " ; ".join(comment_parts)
 
-    return line, target_metric, duration, distance
+    warnings = [warning] if warning else []
+    return line, target_metric, duration, distance, warnings
 
 
 def _duration_seconds(value: Any) -> int:
@@ -265,9 +295,10 @@ def _duration_seconds(value: Any) -> int:
 
 def _render_steps(
     steps: list[dict[str, Any]], sport: str, depth: int = 0
-) -> tuple[list[str], list[str], int, float]:
+) -> tuple[list[str], list[str], int, float, list[str]]:
     lines: list[str] = []
     target_metrics: list[str] = []
+    warnings: list[str] = []
     total_duration = 0
     total_distance = 0.0
 
@@ -277,24 +308,26 @@ def _render_steps(
         if repeat and isinstance(nested, list):
             title = str(step.get("name") or step.get("type") or "Repeat").replace("_", " ").title()
             lines.append(f"{title} x{repeat}")
-            nested_lines, nested_targets, nested_duration, nested_distance = _render_steps(
+            nested_lines, nested_targets, nested_duration, nested_distance, nested_warnings = _render_steps(
                 nested, sport, depth + 1
             )
             lines.extend(nested_lines)
             lines.append("")
             target_metrics.extend(nested_targets * repeat)
+            warnings.extend(nested_warnings)
             total_duration += nested_duration * repeat
             total_distance += nested_distance * repeat
             continue
 
-        line, target_metric, duration, distance = _step_line(step, sport)
+        line, target_metric, duration, distance, step_warnings = _step_line(step, sport)
         lines.append(line)
         if target_metric:
             target_metrics.append(target_metric)
+        warnings.extend(step_warnings)
         total_duration += duration
         total_distance += distance
 
-    return lines, target_metrics, total_duration, total_distance
+    return lines, target_metrics, total_duration, total_distance, list(dict.fromkeys(warnings))
 
 
 def _global_target(metrics: list[str]) -> str | None:
@@ -315,7 +348,7 @@ def _workout_to_event(workout: dict[str, Any]) -> tuple[dict[str, Any], dict[str
     if not isinstance(steps, list) or not steps:
         raise ValueError("Workout is missing a non-empty steps array")
 
-    lines, target_metrics, total_duration, total_distance = _render_steps(steps, sport)
+    lines, target_metrics, total_duration, total_distance, warnings = _render_steps(steps, sport)
     builder_description = "\n".join(line for line in lines if line is not None).strip()
     intro = str(workout.get("description") or "").strip()
     description = f"{intro}\n\n{builder_description}" if intro else builder_description
@@ -344,6 +377,7 @@ def _workout_to_event(workout: dict[str, Any]) -> tuple[dict[str, Any], dict[str
         "description": description,
         "duration_seconds": total_duration or None,
         "distance_meters": total_distance or None,
+        "warnings": warnings,
     }
     return event_data, preview
 
