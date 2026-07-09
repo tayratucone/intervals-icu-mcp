@@ -54,12 +54,8 @@ STEP_LABELS = {
 }
 
 
-def _parse_payload(workout: str | dict[str, Any] | list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if isinstance(workout, str):
-        parsed = json.loads(workout)
-    else:
-        parsed = workout
-
+def _parse_payload(workout_json: str) -> list[dict[str, Any]]:
+    parsed = json.loads(workout_json)
     if isinstance(parsed, dict):
         return [parsed]
     if isinstance(parsed, list) and all(isinstance(item, dict) for item in parsed):
@@ -353,9 +349,9 @@ def _workout_to_event(workout: dict[str, Any]) -> tuple[dict[str, Any], dict[str
 
 
 async def create_structured_workout(
-    workout: Annotated[
-        str | dict[str, Any] | list[dict[str, Any]],
-        "Structured workout JSON object or array. Fields: date, sport, name, description, steps. Steps may use duration/duration_seconds or distance/distance_meters, target, description, repeat + steps.",
+    workout_json: Annotated[
+        str,
+        "JSON string containing one structured workout object, or an array of workout objects. Fields: date, sport, name, description, steps. Steps may use duration/duration_seconds or distance/distance_meters, target, description, repeat + steps.",
     ],
     dry_run: Annotated[
         bool,
@@ -374,7 +370,7 @@ async def create_structured_workout(
     config: ICUConfig = ctx.get_state("config")
 
     try:
-        workouts = _parse_payload(workout)
+        workouts = _parse_payload(workout_json)
         event_payloads: list[dict[str, Any]] = []
         previews: list[dict[str, Any]] = []
         for item in workouts:
