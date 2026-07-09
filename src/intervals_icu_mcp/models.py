@@ -38,7 +38,7 @@ class Athlete(BaseModel):
     atl: float | None = None
     tsb: float | None = None
     ramp_rate: float | None = None
-    sport_settings: list[SportSettings] = Field(default_factory=list[SportSettings])
+    sport_settings: list[SportSettings] = Field(default_factory=list)
 
 
 class AthleteProfile(BaseModel):
@@ -252,7 +252,14 @@ class PowerCurve(BaseModel):
     name: str | None = None
     type: str | None = None
     athlete_id: str | None = None
-    data: list[DataCurvePt] = Field(default_factory=list[DataCurvePt])
+    data: list[DataCurvePt] = Field(default_factory=list)
+    id: str | None = None
+    label: str | None = None
+    start_date_local: str | None = None
+    end_date_local: str | None = None
+    secs: list[int] = Field(default_factory=list)
+    values: list[int] = Field(default_factory=list)
+    activity_id: list[str] = Field(default_factory=list)
 
 
 class HRCurve(BaseModel):
@@ -261,7 +268,7 @@ class HRCurve(BaseModel):
     name: str | None = None
     type: str | None = None
     athlete_id: str | None = None
-    data: list[DataCurvePt] = Field(default_factory=list[DataCurvePt])
+    data: list[DataCurvePt] = Field(default_factory=list)
 
 
 class PaceCurve(BaseModel):
@@ -270,7 +277,7 @@ class PaceCurve(BaseModel):
     name: str | None = None
     type: str | None = None
     athlete_id: str | None = None
-    data: list[DataCurvePt] = Field(default_factory=list[DataCurvePt])
+    data: list[DataCurvePt] = Field(default_factory=list)
 
 
 # ==================== Training Plan Models ====================
@@ -342,7 +349,10 @@ class Interval(BaseModel):
 class ActivityStreams(BaseModel):
     """Time-series data streams for an activity."""
 
+    model_config = ConfigDict(extra="allow")
+
     watts: list[int | None] | None = None
+    raw_watts: list[int | None] | None = None
     heartrate: list[int | None] | None = None
     cadence: list[int | None] | None = None
     velocity_smooth: list[float | None] | None = None
@@ -406,7 +416,7 @@ class Gear(BaseModel):
     distance: float | None = None  # Total distance in meters
     moving_time: int | None = Field(None, alias="moving_time")  # Total time in seconds
     activity_count: int | None = Field(None, alias="activity_count")
-    reminders: list[GearReminder] = Field(default_factory=list[GearReminder])
+    reminders: list[GearReminder] = Field(default_factory=list)
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -426,6 +436,6 @@ class HistogramBin(BaseModel):
 class Histogram(BaseModel):
     """Histogram data for activity metrics."""
 
-    bins: list[HistogramBin] = Field(default_factory=list[HistogramBin])
+    bins: list[HistogramBin] = Field(default_factory=list)
     total_count: int | None = None
     total_secs: int | None = None
